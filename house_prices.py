@@ -5,13 +5,15 @@ Public kernels I have found particularly useful:
     https://www.kaggle.com/pmarcelino/comprehensive-data-exploration-with-python 
 
 to do:
-
 * missing values -- where are values actually missing, where they correspond to 0
 * categorical variables -- check and quantify (dummy) -- 
 * deal with NaN in GarageYrBlt
 * outliers
 
 X correlation measure -- linear (Pearson) vs. non-linear (Spearman)
+
+to improve:
+* more sophisticated estimate of missing values in the test set (MSZoning, GarageCars, GarageArea)
 
 """
 
@@ -58,6 +60,9 @@ def plot_output(plt_instance,fout=None):
     plt_instance.tight_layout()
     if fout is not None: plt_instance.savefig(plots_dir+fout)
     else: plt_instance.show()
+    plt.clf()
+    plt.close()
+    
             
 def plot_correlation_heatmap(df, features=None, fout=None, method='pearson'):
     
@@ -76,6 +81,7 @@ def plot_correlation_heatmap(df, features=None, fout=None, method='pearson'):
     plot_output(plt, fout=fout)
 
 def transform_5scale_str_int(ds):
+    ds = ds.copy()
     ds[ds=='Po'] = 1
     ds[ds=='Fa'] = 2
     ds[ds=='TA'] = 3
@@ -110,8 +116,8 @@ def transform_7scale_nanstr_int(ds):
     ds[ds=='GLQ'] = 6
     return ds.astype('int64')
 
-def transform_cat_features(df, features):
-    for fi in features:
+def transform_qual_features(df, features):
+    for fi in features:        
         name_num = fi+'_num'
         if fi in ['PoolQC', 'FireplaceQu','GarageQual','GarageCond','BsmtQual','BsmtCond']:
             df[name_num] = transform_6scale_nanstr_int(df[fi])
@@ -119,6 +125,11 @@ def transform_cat_features(df, features):
             df[name_num] = transform_5scale_nanstr_int(df[fi])
         elif fi in ['BsmtFinType1','BsmtFinType2']:
             df[name_num] = transform_7scale_nanstr_int(df[fi])
+        elif fi in ['KitchenQual']:
+            if df[fi].isnull().any():
+                print("!!!", fi, "NaN present -- not converting !!!" )
+            else:
+                df[name_num] = transform_5scale_str_int(df[fi])
     return df
     
 def transform_nan_to_0str(df,features):
@@ -129,15 +140,31 @@ def transform_nan_to_0float(df,features):
     df[features] = df[features].fillna(0.)
     return df
     
-def plot_dummis_vs_price(df,feature):
+def plot_hist_price_per_categories(df,feature,fout=None):
     #df_ = pd.concat([df['SalePrice'], pd.get_dummies(df[feature], columns=[feature])], axis=1)
     grid = sns.FacetGrid(df, col=feature, sharey=False)
     grid.map(plt.hist, 'SalePrice')
-    plt.show()
+    plot_output(plt,fout)
     
-def replace_electrical_nan(df,rep_str='SBrkr'):
-    df['Electrical'] = df['Electrical'].fillna('SBrkr')
-    return df
+def plot_boxplot_categories_vs_price(df,feature,fout=None):
+    sns.boxplot(x=feature, y="SalePrice", data=df)
+    plot_output(plt,fout)
+
+    
+def analyze_cat_feature(df,df2,feature,fout=None):
+    print('\n * ', feature)
+    print(pd.concat([df[feature],df2[feature]]).value_counts())
+    
+    if fout is not None:
+        f_hist = fout+'_hist_price_per_categories.png'
+        f_box = fout+'boxplot_categories_vs_price.png'
+    else:
+        f_hist = None
+        f_box = None
+    
+    plot_hist_price_per_categories(df,feature,f_hist)
+    plot_boxplot_categories_vs_price(df,feature,f_box)
+    
 
 if __name__ in('__main__','__plot__'):
     
@@ -148,27 +175,34 @@ if __name__ in('__main__','__plot__'):
     train, test = make_copies(train_raw, test_raw)
     dfs = [train, test]
     
+    ########################
+    ### GENERAL OVERVIEW ###
+    
     #~ missing_values_overview([train])
     
     #~ plot_correlation_heatmap(train, fout="corr_map_all_num.png")
     #~ plot_correlation_heatmap(train, fout="corr_map_all_num_spearman.png", method='spearman')
     
-    ### Missing values in train set ###
+    ########################################
+    ### MIISSING VALUES IN THE TRAIN SET ###
     
     # features typically chracterizing a house element type
     # relpace NaN by '0' = house does not have the given element
     # these variables probably need to be converted to dummies
-    train = transform_nan_to_0str(train, ['MiscFeature','Alley','Fence','GarageFinish','GarageType','MasVnrType'])
+    features_nan_to_0str = ['MiscFeature','Alley','Fence','GarageFinish','GarageType','MasVnrType']
+    train = transform_nan_to_0str(train, features_nan_to_0str)
     
     # replace NaN with Float = feature actually has 'zero value'
-    train = transform_nan_to_0float(train, ['LotFrontage','MasVnrArea'])
+    features_nan_to_0float = ['LotFrontage','MasVnrArea']
+    train = transform_nan_to_0float(train, features_nan_to_0float)
     
     # features that map a quality of certain house element
     # transform to integer scale 0--4, 0--5, 1--5 (0 for NaN -- no element in the house)
     # ? should these be converted to dummies
-    train = transform_cat_features(train, features=['PoolQC', 'FireplaceQu',
-                                                    'GarageQual','GarageCond',
-                                                    'BsmtQual','BsmtCond','BsmtExposure', 'BsmtFinType1','BsmtFinType2'])
+    features_qual_to_int = ['PoolQC', 'FireplaceQu', 'KitchenQual',
+                            'GarageQual','GarageCond',
+                            'BsmtQual','BsmtCond','BsmtExposure', 'BsmtFinType1','BsmtFinType2']
+    train = transform_qual_features(train, features_qual_to_int)
     
     #~ print(train.loc[:19,['SalePrice','FireplaceQu_num','PoolQC_num']])
     print(train[['SalePrice',
@@ -176,18 +210,103 @@ if __name__ in('__main__','__plot__'):
                 'GarageQual_num','GarageCond_num',
                 'BsmtQual_num','BsmtCond_num','BsmtExposure_num', 'BsmtFinType1_num','BsmtFinType2_num']].corr())
     
+    ### Electrical
+    #~ analyze_cat_feature(train,test,'Electrical')
     # One missing value of 'Electrical'
-    # print(' * Electrical')
-    # print('\t',train[['Electrical','SalePrice']].groupby('Electrical').count())
     # => vast majority of houses seem to have Electrical='SBrkr' => replace NaN by 'SBrkr'
-    train = replace_electrical_nan(train)
+    train['Electrical'] = train['Electrical'].fillna('SBrkr')
     
     #~ data_overview([train])
-    missing_values_overview([train,test])
     #~ plot_correlation_heatmap(train, method='spearman')
     
-    ### Missing values in test set ###
+    #######################################
+    ### MISSING VALUES IN THE TRAIN SET ###
     
+    test = transform_nan_to_0str(test, features_nan_to_0str)
+    test = transform_nan_to_0float(test, features_nan_to_0float)
+    test = transform_qual_features(test, features_qual_to_int)
+    
+    """
+    Apart from the above features that have missing values in the train set,
+    there are several features with 1--4 missing values in the test set.
+    """
+    
+    ### MSZoning
+    #~ analyze_cat_feature(train,test,'MSZoning',fout='MSZoning_train')
+    
+    # It looks like MSZoning might be important.
+    # The category RL is by far the most common, so I will fill the missing values with RL.
+    # There might be a better way to do this, perhaps estimate MSZoning from other features.
+    test['MSZoning'] = test['MSZoning'].fillna('RL')
+    
+    ### Functional
+    #~ analyze_cat_feature(train,test,'Functional',fout='Functional_train')
+    
+    # Not sure if Functional will be important.
+    # The category Typ far most common, so use it for NaNs
+    test['Functional'] = test['Functional'].fillna('Typ')
+    
+    ### Utilities
+    #~ analyze_cat_feature(train,test,'Utilities')
+    
+    # Only two categories present and only two examples in the minor class.
+    # Will not be used for the modeling.
+    
+    ### BsmtFullBath and BsmtHalfBath
+    #~ print(train.corr(method='spearman')[['BsmtFullBath','BsmtHalfBath']])
+    
+    # corr_coef with SalePrice: 0.225125, -0.012189
+    # BsmtFullBath is strongly correlated with other basement features.
+    # BsmtHalfBath is not strongly correlated to anythong.
+    # Will not be used for the modeling.
+    
+    ### KitchenQual
+    #~ print(train.corr(method='spearman')[['KitchenQual_num']])
+    #~ analyze_cat_feature(train,test,'KitchenQual',fout='KitchenQual_train')
+    #~ print(test.loc[test['KitchenQual'].isnull(),'OverallQual'])
+    
+    # KitchenQual seems to be highly correlated to SalePrice as well as other variables
+    # (eg OverallQual, YearRemodAdd, YearBuilt).
+    # The correlation between KitchenQual_num and SalePrice is 0.67 
+    # and 0.66 with OverallQual, which is average (5).
+    # Replace missing value with TA (Average/Typical) which 
+    # roughly corresponds to OverallQual and is most common.
+    test['KitchenQual'] = test['KitchenQual'].fillna('TA')
+    test = transform_qual_features(test, 'KitchenQual')
+    
+    ### Exterior1st and Exterior2nd
+    #~ analyze_cat_feature(train,test,'Exterior1st')
+    #~ analyze_cat_feature(train,test,'Exterior2nd')
+    
+    # Features with many (>20) categories.
+    # Might be useful, but probably will not use them for the modelling.
+    
+    ### BsmtFinSF1 and BsmtFinSF2
+    #print(train.corr(method='spearman')[['BsmtFinSF1','BsmtFinSF2']])
+    
+    # corr_coef with SalePrice: 0.301871   -0.038806
+    # BsmtFinSF is relatively corralated but also with BsmtFinType1_num (~0.8)
+    # or BsmtFullBath (~0.67).
+    # Will not be used for modelling
+    
+    ### GarageCars and GarageArea
+    #~ print(train.corr(method='spearman')[['GarageCars','GarageArea']])
+    
+    # Highly correlated with SalePrice:  0.690711    0.649379 and might be important.
+    # This is a tricky example since we also need adjust all the other Garage variables.
+    # But it is only one example, so I will just use 0 here (there is space for improvement here).
+    test['GarageCars'] = test['GarageCars'].fillna(0)
+    test['GarageArea'] = test['GarageArea'].fillna(0.)
+    
+    ### SaleType
+    #~ analyze_cat_feature(train,test,'SaleType')
+    
+    # Might be important. Replace missing value by WD which is by far the most common.
+    test['SaleType'] = test['SaleType'].fillna('WD')
+    
+    ##################
+    
+    missing_values_overview([train,test])
     
     
     
