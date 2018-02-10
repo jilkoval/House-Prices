@@ -5,22 +5,18 @@ Public kernels I have found particularly useful:
     https://www.kaggle.com/pmarcelino/comprehensive-data-exploration-with-python 
 
 to do:
-* missing values -- where are values actually missing, where they correspond to 0
-* categorical variables -- check and quantify (dummy) -- 
-* deal with NaN in GarageYrBlt
 * outliers
-
-X correlation measure -- linear (Pearson) vs. non-linear (Spearman)
 
 to improve:
 * more sophisticated estimate of missing values in the test set (MSZoning, GarageCars, GarageArea)
-
+* include ['Neighborhood', 'Condition1', 'Condition2']
 """
 
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
+import re
 
 sns.set(context="notebook", style="whitegrid", palette="husl")
 
@@ -125,7 +121,7 @@ def transform_qual_features(df, features):
             df[name_num] = transform_5scale_nanstr_int(df[fi])
         elif fi in ['BsmtFinType1','BsmtFinType2']:
             df[name_num] = transform_7scale_nanstr_int(df[fi])
-        elif fi in ['KitchenQual']:
+        elif fi in ['KitchenQual','ExterQual', 'ExterCond']:
             if df[fi].isnull().any():
                 print("!!!", fi, "NaN present -- not converting !!!" )
             else:
@@ -165,6 +161,18 @@ def analyze_cat_feature(df,df2,feature,fout=None):
     plot_hist_price_per_categories(df,feature,f_hist)
     plot_boxplot_categories_vs_price(df,feature,f_box)
     
+def add_dummies(df,features):
+    df = pd.concat([df, pd.get_dummies(df[features], columns=[features], prefix=features)], axis=1)
+    return df
+    
+def explore_dummies_corr(df,feature,verbose=True):
+    df_with_dum = add_dummies(df,feature)
+    cols = [fi for fi in df_with_dum.columns if feature+'_' in fi]
+    corrs = df_with_dum.corr(method='spearman')
+    if verbose:
+        print(corrs.loc['SalePrice', cols])
+    return corrs.loc['SalePrice', cols].abs().max()
+    
 
 if __name__ in('__main__','__plot__'):
     
@@ -186,6 +194,8 @@ if __name__ in('__main__','__plot__'):
     ########################################
     ### MIISSING VALUES IN THE TRAIN SET ###
     
+    features_not_used_due_to_na = []
+    
     # features typically chracterizing a house element type
     # relpace NaN by '0' = house does not have the given element
     # these variables probably need to be converted to dummies
@@ -205,13 +215,21 @@ if __name__ in('__main__','__plot__'):
     train = transform_qual_features(train, features_qual_to_int)
     
     #~ print(train.loc[:19,['SalePrice','FireplaceQu_num','PoolQC_num']])
-    print(train[['SalePrice',
-                'FireplaceQu_num','PoolQC_num','LotFrontage','MasVnrArea',
-                'GarageQual_num','GarageCond_num',
-                'BsmtQual_num','BsmtCond_num','BsmtExposure_num', 'BsmtFinType1_num','BsmtFinType2_num']].corr())
+    #~ print(train[['SalePrice',
+                #~ 'FireplaceQu_num','PoolQC_num','LotFrontage','MasVnrArea',
+                #~ 'GarageQual_num','GarageCond_num',
+                #~ 'BsmtQual_num','BsmtCond_num','BsmtExposure_num', 'BsmtFinType1_num','BsmtFinType2_num']].corr())
+                
+    ### GarageYrBlt
+    # Missing for the same number of examples as GarageQual etc, i.e., for houses without a garage.
+    #~ print(train.corr(method='spearman')[['GarageYrBlt']])
+    # Highly correlated with YearBlt and will not be used.
+    features_not_used_due_to_na.append('GarageYrBlt')
+    
     
     ### Electrical
     #~ analyze_cat_feature(train,test,'Electrical')
+    
     # One missing value of 'Electrical'
     # => vast majority of houses seem to have Electrical='SBrkr' => replace NaN by 'SBrkr'
     train['Electrical'] = train['Electrical'].fillna('SBrkr')
@@ -220,7 +238,7 @@ if __name__ in('__main__','__plot__'):
     #~ plot_correlation_heatmap(train, method='spearman')
     
     #######################################
-    ### MISSING VALUES IN THE TRAIN SET ###
+    ### MISSING VALUES IN THE TEST SET ###
     
     test = transform_nan_to_0str(test, features_nan_to_0str)
     test = transform_nan_to_0float(test, features_nan_to_0float)
@@ -251,6 +269,7 @@ if __name__ in('__main__','__plot__'):
     
     # Only two categories present and only two examples in the minor class.
     # Will not be used for the modeling.
+    features_not_used_due_to_na.append('Utilities')
     
     ### BsmtFullBath and BsmtHalfBath
     #~ print(train.corr(method='spearman')[['BsmtFullBath','BsmtHalfBath']])
@@ -259,6 +278,8 @@ if __name__ in('__main__','__plot__'):
     # BsmtFullBath is strongly correlated with other basement features.
     # BsmtHalfBath is not strongly correlated to anythong.
     # Will not be used for the modeling.
+    features_not_used_due_to_na.append('BsmtFullBath')
+    features_not_used_due_to_na.append('BsmtHalfBath')
     
     ### KitchenQual
     #~ print(train.corr(method='spearman')[['KitchenQual_num']])
@@ -280,6 +301,8 @@ if __name__ in('__main__','__plot__'):
     
     # Features with many (>20) categories.
     # Might be useful, but probably will not use them for the modelling.
+    features_not_used_due_to_na.append('Exterior1st')
+    features_not_used_due_to_na.append('Exterior2nd')
     
     ### BsmtFinSF1 and BsmtFinSF2
     #print(train.corr(method='spearman')[['BsmtFinSF1','BsmtFinSF2']])
@@ -288,6 +311,8 @@ if __name__ in('__main__','__plot__'):
     # BsmtFinSF is relatively corralated but also with BsmtFinType1_num (~0.8)
     # or BsmtFullBath (~0.67).
     # Will not be used for modelling
+    features_not_used_due_to_na.append('BsmtFinSF1')
+    features_not_used_due_to_na.append('BsmtFinSF2')
     
     ### GarageCars and GarageArea
     #~ print(train.corr(method='spearman')[['GarageCars','GarageArea']])
@@ -304,10 +329,78 @@ if __name__ in('__main__','__plot__'):
     # Might be important. Replace missing value by WD which is by far the most common.
     test['SaleType'] = test['SaleType'].fillna('WD')
     
-    ##################
+    ################
+    #~ missing_values_overview([train,test])
     
-    missing_values_overview([train,test])
+    print(" * Features not used due to missing values and mutual correlations: \n \t", features_not_used_due_to_na)
+    
+    # All the important missing values should be covered now.
     
     
+    #############################################
+    ### FEATURES HIGHLY CORRELATED WITH PRICE ###
     
+    print(train.columns)
+    
+    # convert quality features (that have not been converted yet) to numeric
+    qual_features_to_num = ['ExterQual', 'ExterCond', 'HeatingQC', 'GarageQual', 'GarageCond', 'PoolQC']
+    train = transform_qual_features(train, qual_features_to_num)
+    test = transform_qual_features(test, qual_features_to_num)
+    
+    # correlation matrix
+    corr_train = train.corr(method='spearman')
+    print(corr_train['SalePrice'].abs().sort_values(ascending=False))
+    
+    # pick numerical features correlated more than certain threshold
+    corr_lim = 0.30
+    con_features_keep = corr_train[corr_train['SalePrice'].abs()>corr_lim].index.tolist()
+    # decided not to be used based on the missing values
+    con_features_keep.remove('SalePrice')
+    for fi in features_not_used_due_to_na:
+        try: con_features_keep.remove(fi)
+        except: pass
+    
+    # check correlation of categorical features through dummy variables and keep those
+    # for which at least one is correlated more than given threshold
+    cat_features_keep = []
+    features_cat = ['MSZoning', 'Street', 'Alley', 'LotShape', 'LandContour', 'Utilities', 'LotConfig',
+       'LandSlope', 'BldgType', 'HouseStyle', 'RoofStyle', 'RoofMatl', 'MasVnrType', 'Foundation', 'Heating',
+       'CentralAir', 'Electrical', 'GarageType', 'GarageFinish', 'PavedDrive', 'MiscFeature', 'SaleType','SaleCondition']    
+    for fi in features_cat:
+        print('* ',fi)
+        max_dummy_corr = explore_dummies_corr(train,fi,verbose=False)
+        if max_dummy_corr>corr_lim: cat_features_keep.append(fi)
+    for fi in features_not_used_due_to_na:
+        try: cat_features_keep.remove(fi)
+        except: pass
+                    
+    print("\n * Continuous features with corr >", corr_lim, len(con_features_keep))
+    print(con_features_keep)
+    print("\n * Categoric features with highest dummy corr >", corr_lim, len(cat_features_keep))
+    print(cat_features_keep)
+    
+    mutual_lim = 0.8
+    #~ plot_correlation_heatmap(train, features=con_features_keep, fout=None, method='spearman')
+    features_to_drop_due_to_mutual_cor = []
+    for fi in con_features_keep:
+        corr_keep = corr_train.loc[con_features_keep,con_features_keep].copy()
+        if sum((corr_keep[fi]>mutual_lim).values)>1:
+            print('--', fi)
+            print(corr_keep.loc[corr_keep[fi]>mutual_lim,fi])
+            print(corr_train.loc['SalePrice',corr_keep.index[corr_keep[fi]>mutual_lim].tolist()])
+            drop_ind = corr_train.loc['SalePrice',corr_keep.index[corr_keep[fi]>mutual_lim].tolist()].idxmin()
+            features_to_drop_due_to_mutual_cor.append(drop_ind)
+    print(list(set(features_to_drop_due_to_mutual_cor)))
+    
+    #~ train_keep = train[con_features_keep.apped(cat_features_keep)].copy(deep=True)
+    #~ test_keep = test[con_features_keep.apped(cat_features_keep)].copy(deep=True)
+
+    features_car = ['Neighborhood', 'Condition1', 'Condition2',]
+    
+    ################################################
+    ### MUTUAL CORRELATIONS OF SELECTED FEATURES ###
+    
+    train = pd.get_dummies(train, dummies=cat_features_keep)
+    #~ test = pd.get_dummies(test, cat_features_keep)
+
     
