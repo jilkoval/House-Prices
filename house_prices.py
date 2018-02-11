@@ -123,7 +123,7 @@ def transform_qual_features(df, features):
             df[name_num] = transform_7scale_nanstr_int(df[fi])
         elif fi in ['KitchenQual','ExterQual', 'ExterCond']:
             if df[fi].isnull().any():
-                print("!!!", fi, "NaN present -- not converting !!!" )
+                print("\t !!!", fi, "NaN present -- not converting !!!" )
             else:
                 df[name_num] = transform_5scale_str_int(df[fi])
     return df
@@ -162,7 +162,7 @@ def analyze_cat_feature(df,df2,feature,fout=None):
     plot_boxplot_categories_vs_price(df,feature,f_box)
     
 def add_dummies(df,features):
-    df = pd.concat([df, pd.get_dummies(df[features], columns=[features], prefix=features)], axis=1)
+    df = pd.concat([df, pd.get_dummies(df[features], columns=features)], axis=1)
     return df
     
 def explore_dummies_corr(df,feature,verbose=True):
@@ -172,6 +172,23 @@ def explore_dummies_corr(df,feature,verbose=True):
     if verbose:
         print(corrs.loc['SalePrice', cols])
     return corrs.loc['SalePrice', cols].abs().max()
+    
+def mutual_corr_more_tha_limit(corr_mat, features, verbose=False):
+    correlated_features = []
+    corr_keep = corr_mat.loc[features,features].copy()
+    for fi in features:
+        if sum((corr_keep[fi].abs()>mutual_lim).values)>1:
+            correlated_with_fi = corr_keep.loc[corr_keep[fi].abs()>mutual_lim,fi].index.values.tolist()
+            f_keep = corr_mat.loc['SalePrice', correlated_with_fi].idxmax()
+            correlated_with_fi.remove(f_keep)
+            correlated_features.extend(correlated_with_fi)
+            if verbose:
+                print('\n\t --', fi)
+                print(corr_keep.loc[corr_keep[fi].abs()>mutual_lim,fi])
+                print(corr_train.loc['SalePrice',corr_keep.index[corr_keep[fi].abs()>mutual_lim].tolist()])
+                print('\t remove:', correlated_with_fi)
+                print('\t keep:', f_keep)
+    return list(set(correlated_features))
     
 
 if __name__ in('__main__','__plot__'):
@@ -191,8 +208,10 @@ if __name__ in('__main__','__plot__'):
     #~ plot_correlation_heatmap(train, fout="corr_map_all_num.png")
     #~ plot_correlation_heatmap(train, fout="corr_map_all_num_spearman.png", method='spearman')
     
-    ########################################
-    ### MIISSING VALUES IN THE TRAIN SET ###
+    #######################################
+    ### MISSING VALUES IN THE TRAIN SET ###
+    
+    print('* Missing values')
     
     features_not_used_due_to_na = []
     
@@ -244,10 +263,8 @@ if __name__ in('__main__','__plot__'):
     test = transform_nan_to_0float(test, features_nan_to_0float)
     test = transform_qual_features(test, features_qual_to_int)
     
-    """
-    Apart from the above features that have missing values in the train set,
-    there are several features with 1--4 missing values in the test set.
-    """
+    # Apart from the above features that have missing values in the train set,
+    # there are several features with 1--4 missing values in the test set.
     
     ### MSZoning
     #~ analyze_cat_feature(train,test,'MSZoning',fout='MSZoning_train')
@@ -340,67 +357,61 @@ if __name__ in('__main__','__plot__'):
     #############################################
     ### FEATURES HIGHLY CORRELATED WITH PRICE ###
     
-    print(train.columns)
-    
     # convert quality features (that have not been converted yet) to numeric
     qual_features_to_num = ['ExterQual', 'ExterCond', 'HeatingQC', 'GarageQual', 'GarageCond', 'PoolQC']
     train = transform_qual_features(train, qual_features_to_num)
     test = transform_qual_features(test, qual_features_to_num)
     
-    # correlation matrix
-    corr_train = train.corr(method='spearman')
-    print(corr_train['SalePrice'].abs().sort_values(ascending=False))
-    
-    # pick numerical features correlated more than certain threshold
-    corr_lim = 0.30
-    con_features_keep = corr_train[corr_train['SalePrice'].abs()>corr_lim].index.tolist()
-    # decided not to be used based on the missing values
-    con_features_keep.remove('SalePrice')
-    for fi in features_not_used_due_to_na:
-        try: con_features_keep.remove(fi)
-        except: pass
-    
-    # check correlation of categorical features through dummy variables and keep those
-    # for which at least one is correlated more than given threshold
-    cat_features_keep = []
+    # dummy variables for categorical features 
     features_cat = ['MSZoning', 'Street', 'Alley', 'LotShape', 'LandContour', 'Utilities', 'LotConfig',
        'LandSlope', 'BldgType', 'HouseStyle', 'RoofStyle', 'RoofMatl', 'MasVnrType', 'Foundation', 'Heating',
        'CentralAir', 'Electrical', 'GarageType', 'GarageFinish', 'PavedDrive', 'MiscFeature', 'SaleType','SaleCondition']    
-    for fi in features_cat:
-        print('* ',fi)
-        max_dummy_corr = explore_dummies_corr(train,fi,verbose=False)
-        if max_dummy_corr>corr_lim: cat_features_keep.append(fi)
+    train = add_dummies(train, features_cat)
+    test = add_dummies(test, features_cat)
+    
+    #~ print(train.columns)
+    
+    # check correlation with SalePrice and keep featured correlated more than given limit
+    corr_lim_keep = 0.30
+    
+    # correlation matrix
+    corr_train = train.corr(method='spearman')
+    features_keep = corr_train[corr_train['SalePrice'].abs()>corr_lim_keep].index.tolist()
+    
+    # drop the target variable and those eliminated during missing values examinationa
+    features_keep.remove('SalePrice')
     for fi in features_not_used_due_to_na:
-        try: cat_features_keep.remove(fi)
+        try: features_keep.remove(fi)
         except: pass
-                    
-    print("\n * Continuous features with corr >", corr_lim, len(con_features_keep))
-    print(con_features_keep)
-    print("\n * Categoric features with highest dummy corr >", corr_lim, len(cat_features_keep))
-    print(cat_features_keep)
+        
+    print("\n* Features with correlation with SalePrice >", corr_lim_keep, '|', len(features_keep), 'features out of', train.shape[1])
+    #~ print(features_keep)
+    print(corr_train.loc['SalePrice',features_keep].abs().sort_values(ascending=False))
+    
+    ################################################
+    ### MUTUAL CORRELATIONS OF SELECTED FEATURES ###
+    
+    # remove features with mutual correlations higher than given limit
+    
+    ### ??? removing features based on mutual corr -- features might be correlated in an entangled way and 
+    ### feature A that is decided to be kept due to corr with feature B might be decided to remove due to
+    ### correlation with feature C.
     
     mutual_lim = 0.8
-    #~ plot_correlation_heatmap(train, features=con_features_keep, fout=None, method='spearman')
-    features_to_drop_due_to_mutual_cor = []
-    for fi in con_features_keep:
-        corr_keep = corr_train.loc[con_features_keep,con_features_keep].copy()
-        if sum((corr_keep[fi]>mutual_lim).values)>1:
-            print('--', fi)
-            print(corr_keep.loc[corr_keep[fi]>mutual_lim,fi])
-            print(corr_train.loc['SalePrice',corr_keep.index[corr_keep[fi]>mutual_lim].tolist()])
-            drop_ind = corr_train.loc['SalePrice',corr_keep.index[corr_keep[fi]>mutual_lim].tolist()].idxmin()
-            features_to_drop_due_to_mutual_cor.append(drop_ind)
-    print(list(set(features_to_drop_due_to_mutual_cor)))
+    features_to_drop_due_to_mutual_cor = mutual_corr_more_tha_limit(corr_train, features_keep, verbose=True)
+    print('* Features to remove due to mutual correlations >', mutual_lim, '|', \
+        len(features_to_drop_due_to_mutual_cor), 'features out of', len(features_keep))
+    for fi in features_to_drop_due_to_mutual_cor:
+        features_keep.remove(fi)
+    plot_correlation_heatmap(train, features=features_keep, fout=None, method='spearman')
+    
+    
     
     #~ train_keep = train[con_features_keep.apped(cat_features_keep)].copy(deep=True)
     #~ test_keep = test[con_features_keep.apped(cat_features_keep)].copy(deep=True)
 
     features_car = ['Neighborhood', 'Condition1', 'Condition2',]
     
-    ################################################
-    ### MUTUAL CORRELATIONS OF SELECTED FEATURES ###
-    
-    train = pd.get_dummies(train, dummies=cat_features_keep)
     #~ test = pd.get_dummies(test, cat_features_keep)
 
     
