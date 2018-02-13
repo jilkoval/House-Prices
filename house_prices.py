@@ -3,13 +3,16 @@ Public kernels I have found particularly useful:
 
 * Pedro Marcelino, Comprehensive data exploration with Python
     https://www.kaggle.com/pmarcelino/comprehensive-data-exploration-with-python 
+    
+* Alexandru Papiu, Regularized Linear Models
+    https://www.kaggle.com/apapiu/regularized-linear-models
 
 to do:
 * outliers
+* transform skewed features
 
 to improve:
 * more sophisticated estimate of missing values in the test set (MSZoning, GarageCars, GarageArea)
-* include ['Neighborhood', 'Condition1', 'Condition2']
 """
 
 import pandas as pd
@@ -17,9 +20,13 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 import re
+import random
+import pickle
+
+from sklearn.model_selection import RandomizedSearchCV,train_test_split
 
 sns.set(context="notebook", style="whitegrid", palette="husl")
-
+pd.set_option('display.max_rows', 40)
 plots_dir = "./plots/"
 
 def read_data():
@@ -60,7 +67,7 @@ def plot_output(plt_instance,fout=None):
     plt.close()
     
             
-def plot_correlation_heatmap(df, features=None, fout=None, method='pearson'):
+def plot_correlation_heatmap(df, features=None, fout=None, method='pearson', verbose=False):
     
     if features is None: 
         corrmat = df.corr(method=method)
@@ -69,13 +76,25 @@ def plot_correlation_heatmap(df, features=None, fout=None, method='pearson'):
     else: corrmat = df[features].corr(method=method)
     
     print("* plotting correlation matrix:", np.shape(corrmat))
-    print("\t", corrmat.columns)
+    if verbose: print("\t", corrmat.columns)
     
     fig, ax = plt.subplots(figsize=(8, 7))
     sns.heatmap(corrmat, vmax=1, vmin=-1, square=True, center=0., cmap="BrBG", xticklabels=True, yticklabels=True)
     
     plot_output(plt, fout=fout)
-
+    
+def plot_pairplot(df, features=None, fout=None):
+    if features is not None: df_plot = df[features]
+    else: df_plot = df
+    
+    sns.pairplot(df_plot, size = 3)
+    
+    plot_output(plt, fout=fout)
+    
+def plot_scatter(df, fx, fy, fout=None):
+    sns.lmplot(x=fx, y=fy, data=df)
+    plot_output(plt, fout=fout)
+    
 def transform_5scale_str_int(ds):
     ds = ds.copy()
     ds[ds=='Po'] = 1
@@ -190,6 +209,136 @@ def mutual_corr_more_tha_limit(corr_mat, features, verbose=False):
                 print('\t keep:', f_keep)
     return list(set(correlated_features))
     
+def scale_data(data_train, data_test):
+    from sklearn.preprocessing import StandardScaler
+    scaler = StandardScaler()
+    scaler.fit(data_train)
+    return scaler.transform(data_train), scaler.transform(data_test)
+    
+def scale_and_transform_SalePrice(train_y):
+    from sklearn.preprocessing import StandardScaler
+    scaler = StandardScaler()
+    train_y = np.log(train_y)
+    train_y = scaler.fit_transform(train_y.reshape(len(train_y), 1)).reshape(len(train_y),)
+    #~ scaler = None
+    return train_y, scaler
+    
+def get_rmse(y,y_true, scaler=None):
+    if scaler is not None:
+        y =  scaler.inverse_transform(y)
+        y_true =  scaler.inverse_transform(y_true)
+    return np.sqrt(((y-y_true)**2).sum()/len(y))
+
+def model_LassoCV(X,y,Xtest, scaler=None):
+    from sklearn.linear_model import LassoCV
+    lasso_1 = LassoCV(alphas = [0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.], cv=None, max_iter=50000)
+    lasso_1.fit(X.values, y)
+    alpha = lasso_1.alpha_
+    rmse = get_rmse(lasso_1.predict(X.values),y,scaler)
+    print('* LassoCV model:')
+    print('\t Best alpha:', lasso_1.alpha_)
+    print('\t RMSE on train set', rmse)
+    
+    print(np.linspace(0.5,5,10)*alpha)
+    lasso = LassoCV(alphas = np.linspace(0.5,2,10)*alpha, cv=None, max_iter=50000)
+    lasso.fit(X.values, y)
+    y_hat = lasso.predict(X.values)
+    rmse = get_rmse(y,y_hat,scaler)
+    print('* LassoCV model:')
+    print('\t Best alpha:', lasso.alpha_)
+    print('\t RMSE on train set', rmse)
+    # coefficicents
+    coef = pd.Series(lasso.coef_, index = X.columns)
+    print("Lasso picked " + str(sum(coef != 0)) + " variables and eliminated the other " +  str(sum(coef == 0)) + " variables")
+    return lasso.predict(Xtest)
+    
+def report(results, n_top=10):
+    for i in range(1, n_top + 1):
+        candidates = np.flatnonzero(results['rank_test_score'] == i)
+        for candidate in candidates:
+            print("Model with rank: {0}".format(i))
+            print("Mean validation score: {0:.3f} (std: {1:.3f})".format(
+                  results['mean_test_score'][candidate],
+                  results['std_test_score'][candidate]))
+            print("Parameters: {0}".format(results['params'][candidate]))
+            print("")
+    return 
+            
+def model_random_search(cl, param_dist, n_iter, X, y):
+    random_search = RandomizedSearchCV(cl, 
+                                       param_distributions=param_dist,
+                                       n_iter=n_iter,
+                                       random_state=666,
+                                       cv=3,
+                                       verbose=2)
+    random_search = random_search.fit(X, y)
+    report(random_search.cv_results_, n_top=5)
+    return random_search
+    
+# learning rate of 0.0001--1, list of n_max floats 10**random_uniform
+def rand_learning_rate(n_max=1000):
+    return list(10.**np.random.uniform(-4,-1,n_max))
+
+# hidden layers: generates list of n_max tuples with 
+# n_l_min--n_l_max integers, each between n_a_min and n_a_max
+def rand_hidden_layer_sizes(n_l_min,n_l_max,n_a_min,n_a_max,n_max=1000):
+    n_l = np.random.randint(n_l_min,n_l_max,n_max)
+    list_hl = []
+    for nl_i in n_l:
+        list_hl.append(tuple(np.random.randint(n_a_min,n_a_max,nl_i)))
+    return list_hl
+    
+def rand_alpha(n_max=1000):
+    return list(10.**np.random.uniform(0,2,n_max))
+
+def model_nn(X, y, Xtest, n_search=5, scaler=None):
+    from sklearn.neural_network import MLPRegressor
+    
+    param_dist_nn = {
+                     "hidden_layer_sizes": rand_hidden_layer_sizes(2,10,120,121)
+                    }
+                     
+    random_search_nn1 = model_random_search(MLPRegressor(solver='lbfgs', 
+                                                        tol=1e-3, activation='identity',
+                                                        learning_rate_init=0.001,
+                                                        alpha=10),
+                                            param_dist_nn, 
+                                            n_search, 
+                                            X, y)
+    
+    f = open("random_search_nn_lbfgs.pkl","wb")
+    pickle.dump(random_search_nn1.cv_results_ ,f)
+    f.close()
+                                            
+    model = random_search_nn1.best_estimator_
+    
+    # parameters found for lbgs and corr_limit_keep = 0.2
+    #~ param = {'activation': 'relu', 'alpha': 9.9999999999999995e-08, 'hidden_layer_sizes': (161, 120, 45, 155, 60, 158, 48, 191, 121, 163, 39, 69, 118), 'solver':'lbfgs'}
+    #~ Parameters: {'activation': 'relu', 'alpha': 9.9999999999999995e-08, 'hidden_layer_sizes': (168, 95, 44, 42, 94, 178, 166, 30, 119, 142, 93, 73, 127, 46)}
+    
+    #~ param = {'hidden_layer_sizes': (96, 179, 189, 147, 170, 115, 93, 133, 178), 'learning_rate_init': 0.00011585677289675195, 'activation': 'tanh', 'alpha': 8.087187601652591,    'solver':'lbfgs', 'tol':1e-3}
+    
+    #~ param = {'alpha': 1.9184190359275073, 'activation': 'relu', 'learning_rate_init': 0.00046351918413393371, 'hidden_layer_sizes': (111, 178),
+            #~ 'solver':'adam',
+            #~ 'max_iter':500,
+            #~ 'batch_size':256}
+            
+    #~ model = MLPRegressor(**param)
+    
+    model.fit(X.values, y)
+    y_hat = model.predict(X.values)
+    rmse = get_rmse(y,y_hat,scaler)
+    print('* NN Regressor model:')
+    print('\t RMSE on train set', rmse)
+    return model.predict(Xtest.values)
+        
+def save_prediction(answer, file_out):
+    np.savetxt(file_out, answer, header='Id,SalePrice', delimiter=',', fmt= '%i,%.1f', comments='')
+    
+def write_result(ytest_log, test_id, fout):
+    answer = np.array([test_id, np.exp(ytest_log)]).T
+    save_prediction(answer, fout)
+
 
 if __name__ in('__main__','__plot__'):
     
@@ -233,12 +382,6 @@ if __name__ in('__main__','__plot__'):
                             'BsmtQual','BsmtCond','BsmtExposure', 'BsmtFinType1','BsmtFinType2']
     train = transform_qual_features(train, features_qual_to_int)
     
-    #~ print(train.loc[:19,['SalePrice','FireplaceQu_num','PoolQC_num']])
-    #~ print(train[['SalePrice',
-                #~ 'FireplaceQu_num','PoolQC_num','LotFrontage','MasVnrArea',
-                #~ 'GarageQual_num','GarageCond_num',
-                #~ 'BsmtQual_num','BsmtCond_num','BsmtExposure_num', 'BsmtFinType1_num','BsmtFinType2_num']].corr())
-                
     ### GarageYrBlt
     # Missing for the same number of examples as GarageQual etc, i.e., for houses without a garage.
     #~ print(train.corr(method='spearman')[['GarageYrBlt']])
@@ -288,6 +431,27 @@ if __name__ in('__main__','__plot__'):
     # Will not be used for the modeling.
     features_not_used_due_to_na.append('Utilities')
     
+    ### TotalBsmtSF
+    #~ print(train.corr(method='spearman')[['TotalBsmtSF']])
+    #~ print(pd.concat([train,test], axis=1)['TotalBsmtSF'].describe())
+    #~ plot_scatter(train, '1stFlrSF', 'TotalBsmtSF')
+    #~ pd.set_option("display.max_columns",101)
+    #~ print( test[test['TotalBsmtSF'].isnull()] )
+    
+    # Spearman correlation coef with SalePrice ~0.6
+    # also highly correlated with 1stFlrSF -- basement cannot be larger than 1st Floor
+    # There is no basement for this house so fill with 0
+    test['TotalBsmtSF'] = test['TotalBsmtSF'].fillna(0.)
+    
+    ### BsmtUnfSF
+    #~ print(train.corr(method='spearman')[['BsmtUnfSF']])
+    #~ print(pd.concat([train,test], axis=1)['BsmtUnfSF'].describe())
+    #~ pd.set_option("display.max_columns",101)
+    #~ print( test[test['BsmtUnfSF'].isnull()] )
+    
+    # There is no basement for this house so fill with 0
+    test['BsmtUnfSF'] = test['TotalBsmtSF'].fillna(0.)
+    
     ### BsmtFullBath and BsmtHalfBath
     #~ print(train.corr(method='spearman')[['BsmtFullBath','BsmtHalfBath']])
     
@@ -310,7 +474,7 @@ if __name__ in('__main__','__plot__'):
     # Replace missing value with TA (Average/Typical) which 
     # roughly corresponds to OverallQual and is most common.
     test['KitchenQual'] = test['KitchenQual'].fillna('TA')
-    test = transform_qual_features(test, 'KitchenQual')
+    test = transform_qual_features(test, ['KitchenQual'])
     
     ### Exterior1st and Exterior2nd
     #~ analyze_cat_feature(train,test,'Exterior1st')
@@ -365,14 +529,15 @@ if __name__ in('__main__','__plot__'):
     # dummy variables for categorical features 
     features_cat = ['MSZoning', 'Street', 'Alley', 'LotShape', 'LandContour', 'Utilities', 'LotConfig',
        'LandSlope', 'BldgType', 'HouseStyle', 'RoofStyle', 'RoofMatl', 'MasVnrType', 'Foundation', 'Heating',
-       'CentralAir', 'Electrical', 'GarageType', 'GarageFinish', 'PavedDrive', 'MiscFeature', 'SaleType','SaleCondition']    
+       'CentralAir', 'Electrical', 'GarageType', 'GarageFinish', 'PavedDrive', 'MiscFeature', 'SaleType','SaleCondition',
+       'Neighborhood', 'Condition1', 'Condition2']
     train = add_dummies(train, features_cat)
     test = add_dummies(test, features_cat)
     
     #~ print(train.columns)
     
     # check correlation with SalePrice and keep featured correlated more than given limit
-    corr_lim_keep = 0.30
+    corr_lim_keep = 0.1
     
     # correlation matrix
     corr_train = train.corr(method='spearman')
@@ -386,7 +551,6 @@ if __name__ in('__main__','__plot__'):
         
     print("\n* Features with correlation with SalePrice >", corr_lim_keep, '|', len(features_keep), 'features out of', train.shape[1])
     #~ print(features_keep)
-    print(corr_train.loc['SalePrice',features_keep].abs().sort_values(ascending=False))
     
     ################################################
     ### MUTUAL CORRELATIONS OF SELECTED FEATURES ###
@@ -397,21 +561,36 @@ if __name__ in('__main__','__plot__'):
     ### feature A that is decided to be kept due to corr with feature B might be decided to remove due to
     ### correlation with feature C.
     
-    mutual_lim = 0.8
-    features_to_drop_due_to_mutual_cor = mutual_corr_more_tha_limit(corr_train, features_keep, verbose=True)
+    mutual_lim = 0.95
+    features_to_drop_due_to_mutual_cor = mutual_corr_more_tha_limit(corr_train, features_keep, verbose=False)
     print('* Features to remove due to mutual correlations >', mutual_lim, '|', \
         len(features_to_drop_due_to_mutual_cor), 'features out of', len(features_keep))
     for fi in features_to_drop_due_to_mutual_cor:
         features_keep.remove(fi)
-    plot_correlation_heatmap(train, features=features_keep, fout=None, method='spearman')
+    print(corr_train.loc['SalePrice',features_keep].abs().sort_values(ascending=False))
+    
+    features_num = train[features_keep].select_dtypes(exclude=['uint8']).columns.tolist()
+    #~ plot_pairplot(train, features_num)
+    #~ plot_correlation_heatmap(train, features=features_keep, fout=None, method='spearman', verbose=False)
     
     
     
-    #~ train_keep = train[con_features_keep.apped(cat_features_keep)].copy(deep=True)
-    #~ test_keep = test[con_features_keep.apped(cat_features_keep)].copy(deep=True)
-
-    features_car = ['Neighborhood', 'Condition1', 'Condition2',]
+    ################################################
     
-    #~ test = pd.get_dummies(test, cat_features_keep)
-
+    # copy data using only selected features
+    X_train_all = train[features_keep].copy(deep=True)#.astype('float64')
+    y_train_all = train['SalePrice'].copy(deep=True).astype('float64')
+    X_test = test[features_keep].copy(deep=True)#.astype('float64')
+    test_id = test['Id'].astype('int64')
+    
+    #~ missing_values_overview([X_train_all,X_test], include_corr=False)
+    
+    # scale to mean=0, std=1, and type float64
+    X_train_all.loc[:,:], X_test.loc[:,:] = scale_data(X_train_all, X_test)
+    # scale SalePrice -- remember the inverse transform and np.exp
+    y_train_all, scaler_SalePrice = scale_and_transform_SalePrice(y_train_all.values)
+    
+    y_test_log = model_LassoCV(X_train_all,y_train_all,X_test,scaler=scaler_SalePrice)
+    #~ y_test_log = model_nn(X_train_all,y_train_all,X_test, n_search=5,scaler=scaler_SalePrice)
+    write_result(scaler_SalePrice.inverse_transform(y_test_log), test_id, 'lasso_1.csv')
     
