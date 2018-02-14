@@ -7,9 +7,11 @@ Public kernels I have found particularly useful:
 * Alexandru Papiu, Regularized Linear Models
     https://www.kaggle.com/apapiu/regularized-linear-models
 
+* massquantity, All You Need is PCA (LB: 0.11421, top 4%)
+    https://www.kaggle.com/massquantity/all-you-need-is-pca-lb-0-11421-top-4
+
 to do:
 * outliers
-* transform skewed features
 
 to improve:
 * more sophisticated estimate of missing values in the test set (MSZoning, GarageCars, GarageArea)
@@ -23,7 +25,7 @@ import re
 import random
 import pickle
 
-from sklearn.model_selection import RandomizedSearchCV,train_test_split
+from sklearn.model_selection import RandomizedSearchCV, train_test_split, cross_val_score
 
 sns.set(context="notebook", style="whitegrid", palette="husl")
 pd.set_option('display.max_rows', 40)
@@ -223,6 +225,16 @@ def scale_and_transform_SalePrice(train_y):
     #~ scaler = None
     return train_y, scaler
     
+def transform_skewed_features(df_train, df_test, lim_skew=0.5):
+    from scipy.stats import skew
+    features_num = [fi for fi in df_train.columns.tolist() if '_' not in fi]
+    skewness = df_train[features_num].apply(lambda x: skew(x))
+    skewed_features = skewness[abs(skewness)>lim_skew].index
+    print('* Transforming skewed features, skewness>', lim_skew, ':', skewed_features)
+    df_train[skewed_features] = np.log1p(df_train[skewed_features])
+    df_test[skewed_features] = np.log1p(df_test[skewed_features])
+    return df_train, df_test
+    
 def get_rmse(y,y_true, scaler=None):
     if scaler is not None:
         y =  scaler.inverse_transform(y)
@@ -239,7 +251,6 @@ def model_LassoCV(X,y,Xtest, scaler=None):
     print('\t Best alpha:', lasso_1.alpha_)
     print('\t RMSE on train set', rmse)
     
-    print(np.linspace(0.5,5,10)*alpha)
     lasso = LassoCV(alphas = np.linspace(0.5,2,10)*alpha, cv=None, max_iter=50000)
     lasso.fit(X.values, y)
     y_hat = lasso.predict(X.values)
@@ -248,9 +259,77 @@ def model_LassoCV(X,y,Xtest, scaler=None):
     print('\t Best alpha:', lasso.alpha_)
     print('\t RMSE on train set', rmse)
     # coefficicents
-    coef = pd.Series(lasso.coef_, index = X.columns)
+    coef = pd.Series(abs(lasso.coef_), index = X.columns)
     print("Lasso picked " + str(sum(coef != 0)) + " variables and eliminated the other " +  str(sum(coef == 0)) + " variables")
+    print(coef.sort_values(ascending=False)[:15])
     return lasso.predict(Xtest)
+    
+def tune_SVR(X,y,Xtest, n_search=5, scaler=None):
+    from sklearn.svm import SVR
+    param_dist_svr = {
+                    "C": rand_uni(0,20),
+                    "epsilon": rand_power(-3,0),
+                    }
+                    #~ "gamma": rand_power(-5,1)
+    random_search_svr = model_random_search(SVR(),
+                                            param_dist_svr,
+                                            n_search, 
+                                            X, y)
+    model = random_search_svr.best_estimator_
+    model.fit(X.values, y)
+    y_hat = model.predict(X.values)
+    rmse = get_rmse(y,y_hat,scaler)
+    print('* NN Regressor model:')
+    print('\t RMSE on train set', rmse)
+    return model.predict(Xtest.values)
+    
+def rmse_cv(model,X,y):
+    rmse = np.sqrt(-cross_val_score(model, X, y, scoring="neg_mean_squared_error", cv=5))
+    return rmse
+    
+def tune_KernelRidge(X,y,Xtest, n_search=5, scaler=None):
+    from sklearn.kernel_ridge import KernelRidge
+    param_dist = {
+                  "degree": rand_uni_int(1,2),
+                 }
+    random_search = model_random_search(KernelRidge(kernel="rbf", 
+                                                    degree=2,
+                                                    alpha=0.1),
+                                        param_dist,
+                                        n_search, 
+                                        X, y)
+    model = random_search.best_estimator_
+    model.fit(X.values, y)
+    y_hat = model.predict(X.values)
+    rmse = get_rmse(y,y_hat,scaler)
+    print('* NN Regressor model:')
+    print('\t RMSE on train set', rmse)
+    return model.predict(Xtest.values)
+    
+def tune_RFR(X,y,Xtest, n_search=5, scaler=None):
+    from sklearn.ensemble import RandomForestRegressor
+    param_dist_rfr = {
+                    "n_estimators": rand_uni_int(10,300)
+                    }
+                    #~ "gamma": rand_power(-5,1)
+    random_search_rfr = model_random_search(RandomForestRegressor(),
+                                            param_dist_rfr,
+                                            n_search, 
+                                            X, y)
+    model = random_search_rfr.best_estimator_
+    model.fit(X.values, y)
+    y_hat = model.predict(X.values)
+    rmse = get_rmse(y,y_hat,scaler)
+    print('* NN Regressor model:')
+    print('\t RMSE on train set', rmse)
+    return model.predict(Xtest.values)
+    
+def rand_uni(c_min,c_max,n_max=1000):
+    return list(np.random.uniform(c_min,c_max,n_max))
+    
+def rand_uni_int(c_min,c_max,n_max=1000):
+    return list(np.random.randint(c_min,c_max,n_max))
+    
     
 def report(results, n_top=10):
     for i in range(1, n_top + 1):
@@ -270,14 +349,14 @@ def model_random_search(cl, param_dist, n_iter, X, y):
                                        n_iter=n_iter,
                                        random_state=666,
                                        cv=3,
-                                       verbose=2)
+                                       verbose=2,
+                                       scoring="neg_mean_squared_error")
     random_search = random_search.fit(X, y)
     report(random_search.cv_results_, n_top=5)
     return random_search
     
-# learning rate of 0.0001--1, list of n_max floats 10**random_uniform
-def rand_learning_rate(n_max=1000):
-    return list(10.**np.random.uniform(-4,-1,n_max))
+def rand_power(p_min,p_max,n_max=1000):
+    return list(10.**np.random.uniform(p_min,p_max,n_max))
 
 # hidden layers: generates list of n_max tuples with 
 # n_l_min--n_l_max integers, each between n_a_min and n_a_max
@@ -288,43 +367,42 @@ def rand_hidden_layer_sizes(n_l_min,n_l_max,n_a_min,n_a_max,n_max=1000):
         list_hl.append(tuple(np.random.randint(n_a_min,n_a_max,nl_i)))
     return list_hl
     
-def rand_alpha(n_max=1000):
-    return list(10.**np.random.uniform(0,2,n_max))
+def run_nn(X, y, Xtest, scaler=None, **param):
+    from sklearn.neural_network import MLPRegressor
+    model = MLPRegressor(**param)
+    model.fit(X.values, y)
+    y_hat = model.predict(X.values)
+    rmse = get_rmse(y,y_hat,scaler)
+    print('* NN Regressor model:')
+    print('\t RMSE on train set', rmse)
+    return model.predict(Xtest.values)
 
-def model_nn(X, y, Xtest, n_search=5, scaler=None):
+def tune_nn(X, y, Xtest, n_search=5, scaler=None, solver='lbfgs', fout=None):
     from sklearn.neural_network import MLPRegressor
     
+    # parameters to be tuned by random CV search
     param_dist_nn = {
-                     "hidden_layer_sizes": rand_hidden_layer_sizes(2,10,120,121)
+                    "alpha":rand_power(-2,1),
                     }
+                    #~ "learning_rate_init":rand_power(-3,0),
+                    #~ "hidden_layer_sizes": rand_hidden_layer_sizes(2,3,50,200)
                      
-    random_search_nn1 = model_random_search(MLPRegressor(solver='lbfgs', 
-                                                        tol=1e-3, activation='identity',
-                                                        learning_rate_init=0.001,
-                                                        alpha=10),
+    random_search_nn1 = model_random_search(MLPRegressor(solver=solver, 
+                                                         tol=5e-4, 
+                                                         activation='tanh',
+                                                         learning_rate_init=0.08,
+                                                         learning_rate='adaptive',
+                                                         alpha=1.5,
+                                                         hidden_layer_sizes=(1000,500),
+                                                         max_iter=1000),
                                             param_dist_nn, 
                                             n_search, 
                                             X, y)
-    
-    f = open("random_search_nn_lbfgs.pkl","wb")
-    pickle.dump(random_search_nn1.cv_results_ ,f)
-    f.close()
-                                            
+    if fout is not None:
+        f = open(fout,"wb")
+        pickle.dump(random_search_nn1.cv_results_ ,f)
+        f.close()
     model = random_search_nn1.best_estimator_
-    
-    # parameters found for lbgs and corr_limit_keep = 0.2
-    #~ param = {'activation': 'relu', 'alpha': 9.9999999999999995e-08, 'hidden_layer_sizes': (161, 120, 45, 155, 60, 158, 48, 191, 121, 163, 39, 69, 118), 'solver':'lbfgs'}
-    #~ Parameters: {'activation': 'relu', 'alpha': 9.9999999999999995e-08, 'hidden_layer_sizes': (168, 95, 44, 42, 94, 178, 166, 30, 119, 142, 93, 73, 127, 46)}
-    
-    #~ param = {'hidden_layer_sizes': (96, 179, 189, 147, 170, 115, 93, 133, 178), 'learning_rate_init': 0.00011585677289675195, 'activation': 'tanh', 'alpha': 8.087187601652591,    'solver':'lbfgs', 'tol':1e-3}
-    
-    #~ param = {'alpha': 1.9184190359275073, 'activation': 'relu', 'learning_rate_init': 0.00046351918413393371, 'hidden_layer_sizes': (111, 178),
-            #~ 'solver':'adam',
-            #~ 'max_iter':500,
-            #~ 'batch_size':256}
-            
-    #~ model = MLPRegressor(**param)
-    
     model.fit(X.values, y)
     y_hat = model.predict(X.values)
     rmse = get_rmse(y,y_hat,scaler)
@@ -528,16 +606,17 @@ if __name__ in('__main__','__plot__'):
     
     # dummy variables for categorical features 
     features_cat = ['MSZoning', 'Street', 'Alley', 'LotShape', 'LandContour', 'Utilities', 'LotConfig',
-       'LandSlope', 'BldgType', 'HouseStyle', 'RoofStyle', 'RoofMatl', 'MasVnrType', 'Foundation', 'Heating',
+       'LandSlope', 'BldgType', 'HouseStyle', 'RoofStyle', 'RoofMatl', 'MasVnrType', 'Foundation', 
        'CentralAir', 'Electrical', 'GarageType', 'GarageFinish', 'PavedDrive', 'MiscFeature', 'SaleType','SaleCondition',
        'Neighborhood', 'Condition1', 'Condition2']
+       #~ 'Heating',
     train = add_dummies(train, features_cat)
     test = add_dummies(test, features_cat)
     
     #~ print(train.columns)
     
     # check correlation with SalePrice and keep featured correlated more than given limit
-    corr_lim_keep = 0.1
+    corr_lim_keep = 0.05
     
     # correlation matrix
     corr_train = train.corr(method='spearman')
@@ -558,9 +637,11 @@ if __name__ in('__main__','__plot__'):
     # remove features with mutual correlations higher than given limit
     
     ### ??? removing features based on mutual corr -- features might be correlated in an entangled way and 
-    ### feature A that is decided to be kept due to corr with feature B might be decided to remove due to
-    ### correlation with feature C.
+    ### feature A that is decided to be kept due to corr with feature B, might be decided to remove due to
+    ### correlation with feature C. This is more important for lower mutual_lim.
     
+    # keeping the mutual correlation limit high will only remove very correlated features,
+    # e.g. complementary dummy variables
     mutual_lim = 0.95
     features_to_drop_due_to_mutual_cor = mutual_corr_more_tha_limit(corr_train, features_keep, verbose=False)
     print('* Features to remove due to mutual correlations >', mutual_lim, '|', \
@@ -573,9 +654,8 @@ if __name__ in('__main__','__plot__'):
     #~ plot_pairplot(train, features_num)
     #~ plot_correlation_heatmap(train, features=features_keep, fout=None, method='spearman', verbose=False)
     
-    
-    
-    ################################################
+    #################
+    ### ML MODELS ###
     
     # copy data using only selected features
     X_train_all = train[features_keep].copy(deep=True)#.astype('float64')
@@ -585,12 +665,49 @@ if __name__ in('__main__','__plot__'):
     
     #~ missing_values_overview([X_train_all,X_test], include_corr=False)
     
+    # transform skewed features -- substantially improves models
+    X_train_all, X_test = transform_skewed_features(X_train_all, X_test)
+    
     # scale to mean=0, std=1, and type float64
     X_train_all.loc[:,:], X_test.loc[:,:] = scale_data(X_train_all, X_test)
     # scale SalePrice -- remember the inverse transform and np.exp
     y_train_all, scaler_SalePrice = scale_and_transform_SalePrice(y_train_all.values)
     
+    ### NN
+    # I tried to use NN with some hyperparameters tuning, adam and lbfgs solvers with regularization.
+    # All models end up overfitting OR result in a score around 0.14.
+    #~ y_test_log = tune_nn(X_train_all, y_train_all, X_test, n_search=5, scaler=scaler_SalePrice, solver='adam')
+    
+    # best NN so far, score~0.13576
+    # corr_lim_keep=0.1
+    #~ par = {'solver':'sgd', 
+           #~ 'tol':1e-3, 
+           #~ 'activation':'tanh',
+           #~ 'hidden_layer_sizes':(100,111,50),
+           #~ 'learning_rate':'adaptive',
+           #~ 'max_iter':1000,
+           #~ 'alpha': 1.6766539709815422, 
+           #~ 'learning_rate_init': 0.014476599457340257
+           #~ }
+    #~ y_test_log = run_nn(X_train_all, y_train_all, X_test, scaler=scaler_SalePrice, **par)
+    #~ write_result(scaler_SalePrice.inverse_transform(y_test_log), test_id, 'nn_sdg_1.csv')        
+    
+    ### Linear regression model with Lasso regularization
+    # Lasso with correlation limit to keep of 0.05 results in the best score so far (0.1252)
     y_test_log = model_LassoCV(X_train_all,y_train_all,X_test,scaler=scaler_SalePrice)
-    #~ y_test_log = model_nn(X_train_all,y_train_all,X_test, n_search=5,scaler=scaler_SalePrice)
-    write_result(scaler_SalePrice.inverse_transform(y_test_log), test_id, 'lasso_1.csv')
+    #~ write_result(scaler_SalePrice.inverse_transform(y_test_log), test_id, 'lasso_005_us.csv')
+    
+    ### SVR
+    #~ y_test_log = tune_SVR(X_train_all, y_train_all, X_test, n_search=5)
+    #~ write_result(scaler_SalePrice.inverse_transform(y_test_log), test_id, 'svr_1.csv')
+    
+    ### Kernel Ridge
+    #~ y_test_log = tune_KernelRidge(X_train_all, y_train_all, X_test, n_search=1)
+    #~ write_result(scaler_SalePrice.inverse_transform(y_test_log), test_id, 'kr_1.csv')
+    
+    ### Random Forest regressor
+    #~ y_test_log = tune_RFR(X_train_all, y_train_all, X_test, n_search=5)
+    #~ write_result(scaler_SalePrice.inverse_transform(y_test_log), test_id, 'svr_1.csv')
+    
+    ######################
     
