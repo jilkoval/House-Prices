@@ -28,7 +28,9 @@ import re
 import random
 import pickle
 
-from sklearn.model_selection import RandomizedSearchCV, train_test_split, cross_val_score
+from sklearn.metrics import mean_squared_error
+from sklearn.model_selection import RandomizedSearchCV, cross_val_score
+from sklearn.cross_validation import train_test_split
 
 sns.set(context="notebook", style="whitegrid", palette="husl")
 pd.set_option('display.max_rows', 40)
@@ -224,11 +226,10 @@ def scale_data(data_train, data_test):
     
 def scale_and_transform_SalePrice(train_y):
     from sklearn.preprocessing import StandardScaler
+    train_y = train_y.apply(lambda x: np.log(x))
     scaler = StandardScaler()
-    train_y = np.log(train_y)
-    train_y = scaler.fit_transform(train_y.reshape(len(train_y), 1)).reshape(len(train_y),)
-    #~ scaler = None
-    return train_y, scaler
+    scaled_values = scaler.fit_transform(train_y.values.reshape(-1, 1)).reshape(len(train_y))
+    return pd.Series(data=scaled_values, index=train_y.index), scaler
     
 def transform_skewed_features(df_train, df_test, lim_skew=0.5):
     from scipy.stats import skew
@@ -246,28 +247,56 @@ def get_rmse(y,y_true, scaler=None):
         y_true =  scaler.inverse_transform(y_true)
     return np.sqrt(((y-y_true)**2).sum()/len(y))
 
-def model_LassoCV(X,y,Xtest, scaler=None):
+def model_LassoCV(X,y,Xtest, scaler=None, verbose=True):
     from sklearn.linear_model import LassoCV
     lasso_1 = LassoCV(alphas = [0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.], cv=None, max_iter=50000)
     lasso_1.fit(X.values, y)
     alpha = lasso_1.alpha_
-    rmse = get_rmse(lasso_1.predict(X.values),y,scaler)
-    print('* LassoCV model:')
-    print('\t Best alpha:', lasso_1.alpha_)
-    print('\t RMSE on train set', rmse)
+    rmse_1 = get_rmse(lasso_1.predict(X.values),y,scaler)
     
     lasso = LassoCV(alphas = np.linspace(0.5,2,10)*alpha, cv=None, max_iter=50000)
     lasso.fit(X.values, y)
     y_hat = lasso.predict(X.values)
     rmse = get_rmse(y,y_hat,scaler)
-    print('* LassoCV model:')
-    print('\t Best alpha:', lasso.alpha_)
-    print('\t RMSE on train set', rmse)
+    
     # coefficicents
     coef = pd.Series(abs(lasso.coef_), index = X.columns)
-    print("Lasso picked " + str(sum(coef != 0)) + " variables and eliminated the other " +  str(sum(coef == 0)) + " variables")
-    print(coef.sort_values(ascending=False)[:15])
-    return lasso.predict(Xtest)
+    features_used = coef[coef != 0].index.tolist()
+    
+    if verbose:
+        print("Lasso picked " + str(sum(coef != 0)) + " variables and eliminated the other " +  str(sum(coef == 0)) + " variables")
+        print(coef.sort_values(ascending=False)[:15])
+        print('* LassoCV model 1st iteration:')
+        print('\t Best alpha:', lasso_1.alpha_)
+        print('\t RMSE on train set', rmse_1)
+        print('* LassoCV model:')
+        print('\t Best alpha:', lasso.alpha_)
+        print('\t RMSE on train set', rmse)
+    
+    return lasso.predict(Xtest), features_used, rmse
+    
+def run_LassoCV_across_variables(X,y,Xtest,Ytest,features_to_drop=None,scaler=None):
+    # run model using all features
+    y_test_hat, used_features, rmse_model_base = model_LassoCV(X, y, Xtest, scaler=scaler)
+    rmse_base = mean_squared_error(Ytest,y_test_hat)
+    print(rmse_model_base, rmse_base, rmse_model_base-rmse_base, len(used_features))
+    
+    y_test_hat, used_features, rmse_model_base = model_LassoCV(X[used_features], y, Xtest[used_features], scaler=scaler)
+    rmse_base = mean_squared_error(Ytest,y_test_hat)
+    print(rmse_model_base, rmse_base, rmse_model_base-rmse_base, len(used_features))
+    
+    # rum models dropping features one by one
+    if features_to_drop is None: features_to_drop = used_features
+    rmse_list = []
+    for fi in features_to_drop:
+        X_ = X[used_features].drop(fi, axis=1)
+        Xtest_ = Xtest[used_features].drop(fi, axis=1)
+        y_test_hat_i, f_used_i, rmse_train_i = model_LassoCV(X_,y,Xtest_, scaler=scaler, verbose=False)
+        rmse_i = mean_squared_error(Ytest,y_test_hat_i)
+        rmse_list.append([rmse_train_i, rmse_i, rmse_train_i-rmse_i,len(f_used_i)])
+        print('\t', fi, rmse_train_i, rmse_i, rmse_train_i-rmse_i, len(f_used_i))
+    rmses = pd.DataFrame(data=np.array(rmse_list), index=features_to_drop, columns=['rmse_train','rmse_test','diff','n_sed'])
+    print(rmses['diff'].sort_values(ascending=False))
     
 def xboost_model(X,y,Xtest, scaler=None, n_search=5):
     from xgboost import XGBRegressor
@@ -276,17 +305,24 @@ def xboost_model(X,y,Xtest, scaler=None, n_search=5):
                     }
                     #~ "n_estimators": rand_uni_int(100,600),
                     #~ "max_depth": [2,3,4,5]
-    random_search = model_random_search(XGBRegressor(max_depth=2,
-                                                     n_estimators=400,
-                                                     learning_rate=0.05),
-                                        param_dist,
-                                        n_search, 
-                                        X, y)
-    model = random_search.best_estimator_
+    #~ random_search = model_random_search(XGBRegressor(max_depth=2,
+                                                     #~ n_estimators=400,
+                                                     #~ learning_rate=0.05),
+                                        #~ param_dist,
+                                        #~ n_search, 
+                                        #~ X, y)
+    #~ model = random_search.best_estimator_
     
-    #~ model = XGBRegressor(max_depth=3,
-                         #~ n_estimators=1300,
-                         #~ learning_rate=0.05)
+    model = XGBRegressor(colsample_bytree=0.2,
+                 gamma=0.0,
+                 learning_rate=0.01,
+                 max_depth=4,
+                 min_child_weight=1.5,
+                 n_estimators=7200,                                                                  
+                 reg_alpha=0.9,
+                 reg_lambda=0.6,
+                 subsample=0.2)
+                         
                          
     model.fit(X, y, verbose=False)
     y_hat = model.predict(X)
@@ -658,7 +694,7 @@ if __name__ in('__main__','__plot__'):
     #~ print(train.columns)
     
     # check correlation with SalePrice and keep featured correlated more than given limit
-    corr_lim_keep = 0.3
+    corr_lim_keep = 0.05
     
     # correlation matrix
     corr_train = train.corr(method='spearman')
@@ -735,7 +771,7 @@ if __name__ in('__main__','__plot__'):
     y_train_all = train['SalePrice'].copy(deep=True).astype('float64')
     X_test = test[features_keep].copy(deep=True)#.astype('float64')
     test_id = test['Id'].astype('int64')
-    
+        
     #~ missing_values_overview([X_train_all,X_test], include_corr=False)
     
     # transform skewed features -- substantially improves models
@@ -744,8 +780,14 @@ if __name__ in('__main__','__plot__'):
     # scale to mean=0, std=1, and type float64
     X_train_all.loc[:,:], X_test.loc[:,:] = scale_data(X_train_all, X_test)
     # scale SalePrice -- remember the inverse transform and np.exp
-    y_train_all, scaler_SalePrice = scale_and_transform_SalePrice(y_train_all.values)
+    y_train_all, scaler_SalePrice = scale_and_transform_SalePrice(y_train_all)
     
+    # From public kernels, I learned that this feature contributes to overfitting.
+    # Not sure how to find that out. I tried dropping individual features one by one and 
+    # comparing CV resutls, but it wasn't that indicative.
+    X_train_all = X_train_all.drop('MSZoning_C (all)',axis=1)
+    X_test = X_test.drop('MSZoning_C (all)',axis=1)
+        
     ### NN
     # I tried to use NN with some hyperparameters tuning, adam and lbfgs solvers with regularization.
     # All models end up overfitting OR result in a score around 0.14.
@@ -780,10 +822,16 @@ if __name__ in('__main__','__plot__'):
     
     ### Linear regression model with Lasso regularization
     # Lasso with correlation limit to keep of 0.05 results in the best score so far (0.1252)
+    y_test_log, used_features, rmse_model = model_LassoCV(X_train_all, y_train_all.values, X_test, scaler=scaler_SalePrice)
+    write_result(scaler_SalePrice.inverse_transform(y_test_log), test_id, 'lasso_all_us_out_2.csv')
     
-    y_test_log = model_LassoCV(X_train_all,y_train_all,X_test,scaler=scaler_SalePrice)
+    #~ X_split_train = X_train_all.sample(frac=0.7,random_state=666)
+    #~ y_split_train = y_train_all[X_split_train.index]
+    #~ X_split_test = X_train_all.drop(X_split_train.index)
+    #~ y_split_test = y_train_all.drop(X_split_train.index)
     
-    #~ write_result(scaler_SalePrice.inverse_transform(y_test_log), test_id, 'lasso_all_us_out.csv')
+    #~ run_LassoCV_across_variables(X_split_train, y_split_train.values, X_split_test, y_split_test.values, features_to_drop=None, scaler=scaler_SalePrice)
+    
     
     ### SVR
     #~ y_test_log = tune_SVR(X_train_all, y_train_all, X_test, n_search=10)
