@@ -13,11 +13,10 @@ Public kernels I have found particularly useful:
 * PhilipBall, Journey to the top 10%
     https://www.kaggle.com/fiorenza2/journey-to-the-top-10
 
-to do:
-* outliers
-
 to improve:
 * more sophisticated estimate of missing values in the test set (MSZoning, GarageCars, GarageArea)
+* tackle variables that contribute to overfitting and drop those
+* stacking models
 """
 
 import pandas as pd
