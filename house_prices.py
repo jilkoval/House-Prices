@@ -10,6 +10,9 @@ Public kernels I have found particularly useful:
 * massquantity, All You Need is PCA (LB: 0.11421, top 4%)
     https://www.kaggle.com/massquantity/all-you-need-is-pca-lb-0-11421-top-4
 
+* PhilipBall, Journey to the top 10%
+    https://www.kaggle.com/fiorenza2/journey-to-the-top-10
+
 to do:
 * outliers
 
@@ -30,6 +33,8 @@ from sklearn.model_selection import RandomizedSearchCV, train_test_split, cross_
 sns.set(context="notebook", style="whitegrid", palette="husl")
 pd.set_option('display.max_rows', 40)
 plots_dir = "./plots/"
+
+np.random.seed(seed=666)
 
 def read_data():
     return pd.read_csv("input/train.csv"), pd.read_csv("input/test.csv")
@@ -264,6 +269,33 @@ def model_LassoCV(X,y,Xtest, scaler=None):
     print(coef.sort_values(ascending=False)[:15])
     return lasso.predict(Xtest)
     
+def xboost_model(X,y,Xtest, scaler=None, n_search=5):
+    from xgboost import XGBRegressor
+    param_dist = {
+                    "learning_rate": rand_power(-2,0),
+                    }
+                    #~ "n_estimators": rand_uni_int(100,600),
+                    #~ "max_depth": [2,3,4,5]
+    random_search = model_random_search(XGBRegressor(max_depth=2,
+                                                     n_estimators=400,
+                                                     learning_rate=0.05),
+                                        param_dist,
+                                        n_search, 
+                                        X, y)
+    model = random_search.best_estimator_
+    
+    #~ model = XGBRegressor(max_depth=3,
+                         #~ n_estimators=1300,
+                         #~ learning_rate=0.05)
+                         
+    model.fit(X, y, verbose=False)
+    y_hat = model.predict(X)
+    rmse = get_rmse(y,y_hat,scaler)
+    print('* XGBoost model:')
+    print('\t RMSE on train set', rmse)
+    return model.predict(Xtest)
+    
+    
 def tune_SVR(X,y,Xtest, n_search=5, scaler=None):
     from sklearn.svm import SVR
     param_dist_svr = {
@@ -290,11 +322,14 @@ def rmse_cv(model,X,y):
 def tune_KernelRidge(X,y,Xtest, n_search=5, scaler=None):
     from sklearn.kernel_ridge import KernelRidge
     param_dist = {
-                  "degree": rand_uni_int(1,2),
+                  "alpha": rand_power(-2,0),
+                  "coef0": rand_uni(0,3)
                  }
-    random_search = model_random_search(KernelRidge(kernel="rbf", 
-                                                    degree=2,
-                                                    alpha=0.1),
+                  #~ "gamma": rand_power(-4,-2)
+    random_search = model_random_search(KernelRidge(kernel="polynomial", 
+                                                    degree=4,
+                                                    alpha=0.1,
+                                                    gamma=0.001),
                                         param_dist,
                                         n_search, 
                                         X, y)
@@ -388,12 +423,12 @@ def tune_nn(X, y, Xtest, n_search=5, scaler=None, solver='lbfgs', fout=None):
                     #~ "hidden_layer_sizes": rand_hidden_layer_sizes(2,3,50,200)
                      
     random_search_nn1 = model_random_search(MLPRegressor(solver=solver, 
-                                                         tol=5e-4, 
+                                                         tol=1e-3, 
                                                          activation='tanh',
                                                          learning_rate_init=0.08,
                                                          learning_rate='adaptive',
                                                          alpha=1.5,
-                                                         hidden_layer_sizes=(1000,500),
+                                                         hidden_layer_sizes=(500,),
                                                          max_iter=1000),
                                             param_dist_nn, 
                                             n_search, 
@@ -613,10 +648,17 @@ if __name__ in('__main__','__plot__'):
     train = add_dummies(train, features_cat)
     test = add_dummies(test, features_cat)
     
+    # Remove some dummy variables that are present in the train set but not in the test set
+    # Otherwise results in an error later
+    dummies_not_in_test_set = ['HouseStyle_2.5Fin', 'RoofMatl_ClyTile', 'RoofMatl_Membran', 'RoofMatl_Metal',
+                               'RoofMatl_Roll', 'Electrical_Mix', 'MiscFeature_TenC', 'Condition2_RRAe',
+                               'Condition2_RRAn', 'Condition2_RRNn']
+    train = train.drop(dummies_not_in_test_set, axis=1)
+    
     #~ print(train.columns)
     
     # check correlation with SalePrice and keep featured correlated more than given limit
-    corr_lim_keep = 0.05
+    corr_lim_keep = 0.3
     
     # correlation matrix
     corr_train = train.corr(method='spearman')
@@ -648,12 +690,43 @@ if __name__ in('__main__','__plot__'):
         len(features_to_drop_due_to_mutual_cor), 'features out of', len(features_keep))
     for fi in features_to_drop_due_to_mutual_cor:
         features_keep.remove(fi)
-    print(corr_train.loc['SalePrice',features_keep].abs().sort_values(ascending=False))
+    print('* Features with highest correlation with SalePrice:')
+    print(corr_train.loc['SalePrice',features_keep].abs().sort_values(ascending=False).head())
     
     features_num = train[features_keep].select_dtypes(exclude=['uint8']).columns.tolist()
     #~ plot_pairplot(train, features_num)
     #~ plot_correlation_heatmap(train, features=features_keep, fout=None, method='spearman', verbose=False)
     
+    ################
+    ### Outliers ###
+    
+    # Manually remove few outliers
+    
+    # Based on public kernels, it seems that removing outliers should help a bit.
+    # Let's plot few numeric features that are highly correlated with SalePrice
+    fe_plot = ['SalePrice', 'GrLivArea', 'YearBuilt', 'LotArea']
+    plot_pairplot(train, features=fe_plot, fout='pariplot_most_correlated.png')
+    
+    # GrLivArea has two outliers -- large area but much cheaper than the general trand suggests
+    # removing these helps to get better score
+    print('* Removing outliers:')
+    ind_remove = train[(train['GrLivArea']>4000.) & (train['SalePrice']<200000)].index
+    print('\t GrLivArea', ind_remove)
+    train = train.drop(ind_remove)
+    
+    # LotArea
+    ind_remove = train[train['LotArea']>100000.].index
+    print('\t LotArea', ind_remove)
+    train = train.drop(ind_remove)
+    
+    # Year built
+    # helps a little bit
+    ind_remove = train[(train['YearBuilt']<1900.) & (train['SalePrice']>200000)].index
+    print('\t YearBuilt', ind_remove)
+    train = train.drop(ind_remove)
+    
+        
+    plot_pairplot(train, features=fe_plot, fout='pariplot_most_correlated_noout.png')
     #################
     ### ML MODELS ###
     
@@ -692,22 +765,40 @@ if __name__ in('__main__','__plot__'):
     #~ y_test_log = run_nn(X_train_all, y_train_all, X_test, scaler=scaler_SalePrice, **par)
     #~ write_result(scaler_SalePrice.inverse_transform(y_test_log), test_id, 'nn_sdg_1.csv')        
     
+    # corr_keep = 0
+    #~ par = {'solver':'adam', 
+           #~ 'tol':1e-3, 
+           #~ 'activation':'tanh',
+           #~ 'hidden_layer_sizes':(500),
+           #~ 'learning_rate':'adaptive',
+           #~ 'max_iter':1000,
+           #~ 'alpha': 0.25, 
+           #~ 'learning_rate_init': 0.08
+           #~ }
+    #~ y_test_log = run_nn(X_train_all, y_train_all, X_test, scaler=scaler_SalePrice, **par)
+    #~ write_result(scaler_SalePrice.inverse_transform(y_test_log), test_id, 'nn_adam.csv')        
+    
     ### Linear regression model with Lasso regularization
     # Lasso with correlation limit to keep of 0.05 results in the best score so far (0.1252)
+    
     y_test_log = model_LassoCV(X_train_all,y_train_all,X_test,scaler=scaler_SalePrice)
-    #~ write_result(scaler_SalePrice.inverse_transform(y_test_log), test_id, 'lasso_005_us.csv')
+    
+    #~ write_result(scaler_SalePrice.inverse_transform(y_test_log), test_id, 'lasso_all_us_out.csv')
     
     ### SVR
-    #~ y_test_log = tune_SVR(X_train_all, y_train_all, X_test, n_search=5)
+    #~ y_test_log = tune_SVR(X_train_all, y_train_all, X_test, n_search=10)
     #~ write_result(scaler_SalePrice.inverse_transform(y_test_log), test_id, 'svr_1.csv')
     
     ### Kernel Ridge
-    #~ y_test_log = tune_KernelRidge(X_train_all, y_train_all, X_test, n_search=1)
+    #~ y_test_log = tune_KernelRidge(X_train_all, y_train_all, X_test, n_search=10)
     #~ write_result(scaler_SalePrice.inverse_transform(y_test_log), test_id, 'kr_1.csv')
     
     ### Random Forest regressor
     #~ y_test_log = tune_RFR(X_train_all, y_train_all, X_test, n_search=5)
     #~ write_result(scaler_SalePrice.inverse_transform(y_test_log), test_id, 'svr_1.csv')
+    
+    ### XBoost
+    #~ y_test_log = xboost_model(X_train_all, y_train_all, X_test, n_search=10)
     
     ######################
     
